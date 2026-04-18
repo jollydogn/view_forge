@@ -59,9 +59,26 @@ public class ProductSummaryView
 }
 ```
 
-### 2. Register ViewForge
+### 2. Register the View in DbContext
 
 ```csharp
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    base.OnModelCreating(modelBuilder);
+
+    // Tell EF Core this is a SQL View, not a table
+    modelBuilder.Entity<ProductSummaryView>(entity =>
+    {
+        entity.HasNoKey();
+        entity.ToView("vw_product_summary", "report"); // schema + view name
+    });
+}
+```
+
+### 3. Register ViewForge & Layers
+
+```csharp
+// Register ViewForge
 builder.Services.AddViewForge(options =>
 {
     options.DefaultNamingConvention = NamingConvention.SnakeCase;
@@ -69,26 +86,69 @@ builder.Services.AddViewForge(options =>
     options.MaxPageSize = 100;
     options.CaseInsensitiveFilters = true;
 });
+
+// Register application layers (Dependency Inversion)
+builder.Services.AddScoped<IViewForgeSimpleRepository, ViewForgeSimpleRepository>();
+builder.Services.AddScoped<IViewForgeSimpleAppService, ViewForgeSimpleAppService>();
 ```
 
-### 3. Use in Your Controller
+### 4. Repository — All DB Logic Here
 
 ```csharp
-[HttpGet]
-public async Task<PagedResult<ProductSummaryView>> GetProducts(
-    [FromQuery] string? filters,
-    [FromQuery] string? sorting,
-    [FromQuery] int page = 1,
-    [FromQuery] int pageSize = 20,
-    CancellationToken ct = default)
+public class ViewForgeSimpleRepository : IViewForgeSimpleRepository
 {
-    var filterGroup = _filterParser.Parse(filters);
-    var sortDescriptors = SortBuilder.Parse(sorting);
+    private readonly AppDbContext _dbContext;
+    private readonly IFilterBuilder _filterBuilder;
+    private readonly ISortBuilder _sortBuilder;
 
-    return await _dbContext.ProductSummaries
-        .ApplyFilters(filterGroup, _filterBuilder)
-        .ApplySorting(sortDescriptors, _sortBuilder)
-        .ToPagedResultAsync(page, pageSize, ct);
+    public async Task<PagedResult<ProductSummaryView>> GetFilteredListAsync(
+        FilterGroup? filterGroup, List<SortDescriptor> sortDescriptors,
+        int page, int pageSize, CancellationToken ct = default)
+    {
+        return await _dbContext.ProductSummaries.AsNoTracking()
+            .ApplyFilters(filterGroup, _filterBuilder)
+            .ApplySorting(sortDescriptors, _sortBuilder)
+            .ToPagedResultAsync(page, pageSize, ct);
+    }
+}
+```
+
+### 5. AppService — Orchestration Only
+
+```csharp
+public class ViewForgeSimpleAppService : IViewForgeSimpleAppService
+{
+    private readonly IViewForgeSimpleRepository _repository;
+    private readonly FilterParser _filterParser;
+
+    public async Task<PagedResult<ProductSummaryView>> GetFilteredListAsync(
+        string? filters, string? sorting,
+        int page, int pageSize, CancellationToken ct = default)
+    {
+        var filterGroup = _filterParser.Parse(filters);
+        var sortDescriptors = SortBuilder.Parse(sorting);
+        return await _repository.GetFilteredListAsync(filterGroup, sortDescriptors, page, pageSize, ct);
+    }
+}
+```
+
+### 6. Controller — HTTP I/O Only
+
+```csharp
+[ApiController]
+[Route("api/[controller]")]
+public class ProductsController : ControllerBase
+{
+    private readonly IViewForgeSimpleAppService _appService;
+
+    [HttpGet]
+    public async Task<PagedResult<ProductSummaryView>> GetListAsync(
+        [FromQuery] string? filters, [FromQuery] string? sorting,
+        [FromQuery] int page = 1, [FromQuery] int pageSize = 20,
+        CancellationToken ct = default)
+    {
+        return await _appService.GetFilteredListAsync(filters, sorting, page, pageSize, ct);
+    }
 }
 ```
 
@@ -169,11 +229,12 @@ var sorts3 = new List<SortDescriptor>
 Pagination is **fully parameterized** — `page` and `pageSize` come from external sources (controller parameters, query strings, etc.):
 
 ```csharp
-// page & pageSize are passed from controller parameters
-public async Task<PagedResult<ProductView>> GetProducts(
-    int page = 1, int pageSize = 20, CancellationToken ct = default)
+// In the Repository layer — page & pageSize flow from Controller → AppService → Repository
+public async Task<PagedResult<ProductView>> GetFilteredListAsync(
+    FilterGroup? filterGroup, List<SortDescriptor> sortDescriptors,
+    int page, int pageSize, CancellationToken ct = default)
 {
-    return await _dbContext.ProductSummaries
+    return await _dbContext.ProductSummaries.AsNoTracking()
         .ApplyFilters(filterGroup, _filterBuilder)
         .ApplySorting(sortDescriptors, _sortBuilder)
         .ToPagedResultAsync(page, pageSize, ct);
@@ -269,7 +330,13 @@ ViewForge/
 │   │   ├── Models/                   # PagedResult, FilterDescriptor, SortDescriptor
 │   │   └── Providers/                # IViewQueryProvider, EfCoreViewQueryProvider
 │   │
-│   ├── ViewForge.Sample/             # Sample API project
+│   ├── ViewForge.Sample/             # Sample API (SOLID architecture)
+│   │   ├── Controllers/              # HTTP I/O only
+│   │   ├── Services/                 # AppService layer (orchestration)
+│   │   ├── Repositories/            # Repository layer (DB operations)
+│   │   ├── Views/                    # View models
+│   │   └── Data/                     # DbContext, Seed data
+│   │
 │   └── ViewForge.Tests/              # Unit tests (50 tests)
 │
 ├── .github/workflows/                # CI/CD pipelines
