@@ -1,7 +1,3 @@
 <Project>
-  <PropertyGroup>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-    <LangVersion>latest</LangVersion>
-  </PropertyGroup>
+  <!-- Shared build properties for all projects under src/ -->
 </Project>
